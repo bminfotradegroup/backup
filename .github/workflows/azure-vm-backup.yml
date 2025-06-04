@@ -1,0 +1,71 @@
+name: Azure VM Disk Backup
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: '30 11 * * *'  # Runs daily at 5:00 PM IST
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Azure CLI
+        uses: azure/cli@v2
+
+      - name: Load config
+        id: load
+        run: echo "CONFIG=$(cat vm_backup_config.json | jq -c .)" >> $GITHUB_ENV
+
+      - name: Run backup
+        run: |
+          VMS=$(echo $CONFIG | jq -c '.[]')
+          for vm in $VMS; do
+            NAME=$(echo $vm | jq -r '.name')
+            DISK=$(echo $vm | jq -r '.disk_name')
+            RG=$(echo $vm | jq -r '.resource_group')
+            LOC=$(echo $vm | jq -r '.location')
+            SUB=$(echo $vm | jq -r '.subscription_id')
+            SECRET=$(echo $vm | jq -r '.azure_credentials_secret')
+            SA=$(echo $vm | jq -r '.storage_account')
+            CONTAINER=$(echo $vm | jq -r '.container_name')
+
+            echo "Logging into Azure for $NAME..."
+            echo "${{ secrets[$SECRET] }}" > sp.json
+            az login --service-principal \
+              --username $(jq -r .clientId sp.json) \
+              --password $(jq -r .clientSecret sp.json) \
+              --tenant $(jq -r .tenantId sp.json)
+
+            az account set --subscription $SUB
+
+            SNAPSHOT_NAME=snap-${NAME}-$(date +%Y%m%d%H%M%S)
+            echo "Creating snapshot: $SNAPSHOT_NAME"
+            az snapshot create \
+              --name $SNAPSHOT_NAME \
+              --resource-group $RG \
+              --source $DISK \
+              --location $LOC \
+              --sku Standard_LRS
+
+            echo "Generating SAS URL"
+            SAS_URL=$(az snapshot grant-access \
+              --resource-group $RG \
+              --name $SNAPSHOT_NAME \
+              --duration-in-seconds 3600 \
+              --query accessSas -o tsv)
+
+            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
+            echo "Copying to: $DEST_URL"
+            az storage blob copy start \
+              --account-name $SA \
+              --destination-blob "${SNAPSHOT_NAME}.vhd" \
+              --destination-container $CONTAINER \
+              --source-uri "$SAS_URL"
+
+            echo "Cleaning up snapshot..."
+            az snapshot delete --resource-group $RG --name $SNAPSHOT_NAME
+            echo "✅ Done for $NAME"
+          done
