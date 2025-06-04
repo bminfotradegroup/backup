@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Test-BackupVM",
+    "disk_name": "Test-BackupVM_OsDisk_1_522b9b43a633431b8d99ff4a7ae7bb49",
+    "resource_group": "Backup-Automation",
+    "location": "centralindia",
+    "subscription_id": "77e7336c-6927-42cb-b0e8-222560716043",
+    "azure_credentials_secret": "AZURE_CRED_TEST",
+    "storage_account": "diskstorageautobackup",
+    "container_name": "vhdsnapshots"
+  }
+]
