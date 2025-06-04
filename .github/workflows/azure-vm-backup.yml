@@ -60,11 +60,13 @@ jobs:
               --name "$SNAPSHOT_NAME" \
               --duration-in-seconds 86400 \
               --query accessSas -o tsv) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
+            echo "Generated SAS URL: $SAS_URL"
 
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
             echo "☁️ Copying snapshot to blob: $DEST_URL"
             az storage blob copy start \
               --account-name "$SA" \
+              --account-key "${{ secrets.AZURE_STORAGE_KEY }}" \
               --destination-blob "${SNAPSHOT_NAME}.vhd" \
               --destination-container "$CONTAINER" \
               --source-uri "$SAS_URL" || { echo "❌ Blob copy start failed for $NAME"; exit 1; }
