@@ -3,15 +3,17 @@ name: Azure VM Disk Backup
 on:
   workflow_dispatch:  # Manual run
   schedule:
-    - cron: '30 11 * * *'  # Daily at 5:00 PM IST (UTC 11:30)
+    - cron: '30 11 * * *'  # Daily at 5:00 PM IST (11:30 UTC, India Standard Time = UTC+5:30)
 
 jobs:
   backup:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
+
+      - name: Install Azure CLI
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -28,19 +30,20 @@ jobs:
             RG=$(echo $vm | jq -r '.resource_group')
             LOC=$(echo $vm | jq -r '.location')
             SUB=$(echo $vm | jq -r '.subscription_id')
-            SECRET=$(echo $vm | jq -r '.azure_credentials_secret')
+            CLIENT_ID="76cd8095-15aa-4b90-b72a-9e1477f9c865"
+            CLIENT_SECRET="wH58Q~4lQwiD.ROpoeKRlCJAEshGLfetnmVjraCl"
+            TENANT_ID="43b2ab88-f668-409f-ba76-8db3e53453ae"
             SA=$(echo $vm | jq -r '.storage_account')
             CONTAINER=$(echo $vm | jq -r '.container_name')
 
             echo "🔐 Authenticating to Azure for VM: $NAME..."
-            echo "${{ secrets[${SECRET}] }}" > sp.json
             az login --service-principal \
-              --username $(jq -r .clientId sp.json) \
-              --password $(jq -r .clientSecret sp.json) \
-              --tenant $(jq -r .tenantId sp.json) \
-              --allow-no-subscriptions
+              --username "$CLIENT_ID" \
+              --password "$CLIENT_SECRET" \
+              --tenant "$TENANT_ID" \
+              --allow-no-subscriptions || { echo "❌ Login failed for $NAME"; exit 1; }
 
-            az account set --subscription "$SUB"
+            az account set --subscription "$SUB" || { echo "❌ Subscription set failed for $NAME"; exit 1; }
 
             SNAPSHOT_NAME="snap-${NAME}-$(date +%Y%m%d%H%M%S)"
             echo "📸 Creating snapshot: $SNAPSHOT_NAME"
@@ -49,14 +52,14 @@ jobs:
               --resource-group "$RG" \
               --source "$DISK" \
               --location "$LOC" \
-              --sku Standard_LRS
+              --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
             echo "🔗 Generating SAS URL..."
             SAS_URL=$(az snapshot grant-access \
               --resource-group "$RG" \
               --name "$SNAPSHOT_NAME" \
-              --duration-in-seconds 3600 \
-              --query accessSas -o tsv)
+              --duration-in-seconds 86400 \
+              --query accessSas -o tsv) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
 
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
             echo "☁️ Copying snapshot to blob: $DEST_URL"
@@ -64,9 +67,16 @@ jobs:
               --account-name "$SA" \
               --destination-blob "${SNAPSHOT_NAME}.vhd" \
               --destination-container "$CONTAINER" \
-              --source-uri "$SAS_URL"
+              --source-uri "$SAS_URL" || { echo "❌ Blob copy start failed for $NAME"; exit 1; }
+
+            echo "⏳ Waiting for blob copy to complete..."
+            while [ "$(az storage blob copy show --account-name "$SA" --container "$CONTAINER" --blob "${SNAPSHOT_NAME}.vhd" --query 'copy.status' -o tsv)" != "success" ]; do
+              sleep 10
+              echo "Still copying..."
+            done
+            echo "✅ Blob copy completed"
 
             echo "🧹 Cleaning up snapshot..."
-            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME"
+            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
             echo "✅ Backup completed for VM: $NAME"
           done
