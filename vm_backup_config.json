@@ -1,12 +1,24 @@
-[
-  {
-    "name": "Test-BackupVM",
-    "disk_name": "Test-BackupVM_OsDisk_1_522b9b43a633431b8d99ff4a7ae7bb49",
-    "resource_group": "Backup-Automation",
-    "location": "centralindia",
-    "subscription_id": "77e7336c-6927-42cb-b0e8-222560716043",
-    "azure_credentials_secret": "AZURE_CRED_TEST",
-    "storage_account": "diskstorageautobackup",
-    "container_name": "vhdsnapshots"
-  }
-]
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        vm: ${{ fromJson(needs.load_config.outputs.config) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Install Azure CLI
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Run VM backup
+        run: |
+          NAME=${{ matrix.vm.name }}
+          DISK=${{ matrix.vm.disk_name }}
+          RG=${{ matrix.vm.resource_group }}
+          LOC=${{ matrix.vm.location }}
+          SUB=${{ matrix.vm.subscription_id }}
+          SECRET=${{ matrix.vm.azure_credentials_secret }}
+          SA=${{ matrix.vm.storage_account }}
+          CONTAINER=${{ matrix.vm.container_name }}
+          # Rest of the script as above...
