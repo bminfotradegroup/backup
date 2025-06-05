@@ -1,94 +1,86 @@
-name: Azure VM Disk Backup
+#!/bin/bash
 
-on:
-  workflow_dispatch:  # Manual trigger
-  schedule:
-    - cron: '30 11 * * *'  # Daily at 5:00 PM IST (11:30 UTC)
+# Load your JSON config
+CONFIG='[
+  {
+    "vmName": "Test-BackupVM",
+    "resourceGroup": "Backup-Automation",
+    "diskName": "Test-BackupVM_OsDisk_1_522b9b43a633431b8d99ff4a7ae7bb49",
+    "location": "centralindia"
+  }
+]'
 
-env:
-  AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+# Service Principal Credentials
+CLIENT_ID="your-client-id"
+CLIENT_SECRET="your-client-secret"
+TENANT_ID="your-tenant-id"
+SUBSCRIPTION_ID="your-subscription-id"
 
-jobs:
-  backup:
-    runs-on: ubuntu-latest
+# Blob Storage destination (must already exist)
+DESTINATION_URL_BASE="https://diskstorageautobackup.blob.core.windows.net/vhdsnapshots"
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+# Log in using Service Principal
+echo "🔐 Authenticating to Azure..."
+az logout
+az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID" > /dev/null
 
-      - name: Install Azure CLI
-        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+az account set --subscription "$SUBSCRIPTION_ID"
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq
+# Start backup process
+echo "$CONFIG" | jq -c '.[]' | while read vm; do
+  NAME=$(echo "$vm" | jq -r '.vmName')
+  RG=$(echo "$vm" | jq -r '.resourceGroup')
+  DISK_NAME=$(echo "$vm" | jq -r '.diskName')
+  LOCATION=$(echo "$vm" | jq -r '.location')
 
-      - name: Install AzCopy
-        run: |
-          wget https://aka.ms/downloadazcopy-v10-linux -O azcopy.tar.gz
-          tar -xvf azcopy.tar.gz
-          sudo mv ./azcopy_linux_amd64_*/azcopy /usr/bin/
+  TIMESTAMP=$(date +%Y%m%d%H%M%S)
+  SNAPSHOT_NAME="snap-$NAME-$TIMESTAMP"
 
-      - name: Load backup config
-        id: load_config
-        run: echo "CONFIG=$(jq -c . < vm_backup_config.json)" >> $GITHUB_ENV
+  echo "📸 Creating snapshot: $SNAPSHOT_NAME"
 
-      - name: Run VM backup
-        run: |
-          echo "$CONFIG" | jq -c '.[]' | while read vm; do
-            NAME=$(echo $vm | jq -r '.name')
-            DISK=$(echo $vm | jq -r '.disk_name')
-            RG=$(echo $vm | jq -r '.resource_group')
-            LOC=$(echo $vm | jq -r '.location')
-            SUB=$(echo $vm | jq -r '.subscription_id')
-            CLIENT_ID="76cd8095-15aa-4b90-b72a-9e1477f9c865"
-            CLIENT_SECRET="wH58Q~4lQwiD.ROpoeKRlCJAEshGLfetnmVjraCl"
-            TENANT_ID="43b2ab88-f668-409f-ba76-8db3e53453ae"
-            SA=$(echo $vm | jq -r '.storage_account')
-            CONTAINER=$(echo $vm | jq -r '.container_name')
+  az snapshot create \
+    --resource-group "$RG" \
+    --name "$SNAPSHOT_NAME" \
+    --source "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG/providers/Microsoft.Compute/disks/$DISK_NAME" \
+    --location "$LOCATION" \
+    --output none
 
-            echo "🔐 Authenticating to Azure for VM: $NAME..."
-            az login --service-principal \
-              --username "$CLIENT_ID" \
-              --password "$CLIENT_SECRET" \
-              --tenant "$TENANT_ID" \
-              --allow-no-subscriptions || { echo "❌ Login failed for $NAME"; exit 1; }
+  # Wait for snapshot to become available
+  echo "⏳ Waiting for snapshot to be ready..."
+  for i in {1..5}; do
+    STATE=$(az snapshot show --name "$SNAPSHOT_NAME" --resource-group "$RG" --query "provisioningState" -o tsv)
+    echo "   ➜ Snapshot state: $STATE"
+    [ "$STATE" = "Succeeded" ] && break
+    sleep 10
+  done
 
-            az account set --subscription "$SUB" || { echo "❌ Subscription set failed for $NAME"; exit 1; }
+  if [ "$STATE" != "Succeeded" ]; then
+    echo "❌ Snapshot $SNAPSHOT_NAME failed to become ready. Skipping..."
+    continue
+  fi
 
-            SNAPSHOT_NAME="snap-${NAME}-$(date +%Y%m%d%H%M%S)"
-            echo "📸 Creating snapshot: $SNAPSHOT_NAME"
-            az snapshot create \
-              --name "$SNAPSHOT_NAME" \
-              --resource-group "$RG" \
-              --source "$DISK" \
-              --location "$LOC" \
-              --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
+  echo "🔗 Generating SAS URL..."
+  SNAPSHOT_URL=$(az snapshot grant-access \
+    --resource-group "$RG" \
+    --name "$SNAPSHOT_NAME" \
+    --duration-in-seconds 3600 \
+    --query 'accessSas' -o tsv)
 
-            echo "🔗 Generating snapshot SAS URL..."
-            SNAPSHOT_URL=$(az snapshot grant-access \
-              --resource-group "$RG" \
-              --name "$SNAPSHOT_NAME" \
-              --duration-in-seconds 3600 \
-              --query 'accessSas' -o tsv)
+  if [ -z "$SNAPSHOT_URL" ]; then
+    echo "❌ Failed to generate SAS URL for snapshot $SNAPSHOT_NAME"
+    continue
+  fi
 
-            if [[ -z "$SNAPSHOT_URL" ]]; then
-              echo "❌ Failed to generate SAS URL for snapshot $SNAPSHOT_NAME"
-              exit 1
-            fi
+  DEST_FILE="$DESTINATION_URL_BASE/$SNAPSHOT_NAME.vhd"
 
-            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
-            echo "SOURCE: $SNAPSHOT_URL"
-            echo "DEST:   $DEST_URL"
-            echo "📤 Copying snapshot to Blob..."
+  echo "📤 Copying snapshot to Blob Storage..."
+  azcopy copy "$SNAPSHOT_URL" "$DEST_FILE" --overwrite=true
 
-            azcopy copy "$SNAPSHOT_URL" "$DEST_URL" --overwrite=true || {
-              echo "❌ AzCopy failed for $NAME"
-              exit 1
-            }
+  if [ $? -ne 0 ]; then
+    echo "❌ AzCopy failed for $NAME"
+    continue
+  fi
 
-            echo "✅ Snapshot copied to blob: $DEST_URL"
+  echo "✅ Snapshot of $NAME backed up successfully to $DEST_FILE"
 
-            echo "🧹 Cleaning up snapshot..."
-            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
-            echo "✅ Backup completed for VM: $NAME"
-          done
+done
