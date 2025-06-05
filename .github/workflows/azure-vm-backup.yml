@@ -5,9 +5,13 @@ on:
   schedule:
     - cron: '30 11 * * *'  # Daily at 5:00 PM IST (11:30 UTC)
 
+env:
+  AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+
 jobs:
   backup:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -36,7 +40,7 @@ jobs:
             SA=$(echo $vm | jq -r '.storage_account')
             CONTAINER=$(echo $vm | jq -r '.container_name')
 
-            echo "🔐 Logging in to Azure..."
+            echo "🔐 Authenticating to Azure for VM: $NAME..."
             az login --service-principal \
               --username "$CLIENT_ID" \
               --password "$CLIENT_SECRET" \
@@ -54,33 +58,29 @@ jobs:
               --location "$LOC" \
               --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
-            echo "☁️ Copying snapshot to blob..."
-            SOURCE_URI="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Compute/snapshots/$SNAPSHOT_NAME"
-            DEST_BLOB="${SNAPSHOT_NAME}.vhd"
+            echo "🔗 Generating SAS URL..."
+            SNAPSHOT_URL=$(az snapshot grant-access \
+              --resource-group "$RG" \
+              --name "$SNAPSHOT_NAME" \
+              --duration-in-seconds 86400 \
+              --query 'accessSas' -o tsv) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
 
+            echo "☁️ Copying snapshot to blob..."
             az storage blob copy start \
               --account-name "$SA" \
+              --account-key "$AZURE_STORAGE_KEY" \
+              --destination-blob "${SNAPSHOT_NAME}.vhd" \
               --destination-container "$CONTAINER" \
-              --destination-blob "$DEST_BLOB" \
-              --source-uri "$SOURCE_URI" \
-              --auth-mode login || { echo "❌ Blob copy failed for $NAME"; exit 1; }
+              --source-uri "$SNAPSHOT_URL" || { echo "❌ Blob copy start failed for $NAME"; exit 1; }
 
             echo "⏳ Waiting for blob copy to complete..."
-            while [ "$(az storage blob copy show \
-              --account-name "$SA" \
-              --container-name "$CONTAINER" \
-              --name "$DEST_BLOB" \
-              --auth-mode login \
-              --query 'copy.status' -o tsv)" != "success" ]; do
+            while [ "$(az storage blob show --account-name "$SA" --container-name "$CONTAINER" --name "${SNAPSHOT_NAME}.vhd" --query 'properties.copy.status' -o tsv)" != "success" ]; do
               sleep 10
               echo "Still copying..."
             done
             echo "✅ Blob copy completed"
 
-            echo "🧹 Deleting snapshot..."
-            az snapshot delete \
-              --resource-group "$RG" \
-              --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
-
+            echo "🧹 Cleaning up snapshot..."
+            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
             echo "✅ Backup completed for VM: $NAME"
           done
