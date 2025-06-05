@@ -1,13 +1,12 @@
 name: Azure VM Disk Backup
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger
   schedule:
-    - cron: '30 11 * * *'  # Daily at 5:00 PM IST
+    - cron: '30 11 * * *'  # Daily at 5:00 PM IST (11:30 UTC)
 
 env:
   AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
-  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
 jobs:
   backup:
@@ -28,7 +27,6 @@ jobs:
           wget https://aka.ms/downloadazcopy-v10-linux -O azcopy.tar.gz
           tar -xvf azcopy.tar.gz
           sudo mv ./azcopy_linux_amd64_*/azcopy /usr/bin/
-          azcopy --version
 
       - name: Load backup config
         id: load_config
@@ -43,7 +41,7 @@ jobs:
             LOC=$(echo $vm | jq -r '.location')
             SUB=$(echo $vm | jq -r '.subscription_id')
             CLIENT_ID="76cd8095-15aa-4b90-b72a-9e1477f9c865"
-            CLIENT_SECRET="$AZURE_CLIENT_SECRET"
+            CLIENT_SECRET="wH58Q~4lQwiD.ROpoeKRlCJAEshGLfetnmVjraCl"
             TENANT_ID="43b2ab88-f668-409f-ba76-8db3e53453ae"
             SA=$(echo $vm | jq -r '.storage_account')
             CONTAINER=$(echo $vm | jq -r '.container_name')
@@ -67,20 +65,26 @@ jobs:
               --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
             echo "🔗 Generating snapshot SAS URL..."
-            SNAPSHOT_SAS=$(az snapshot grant-access \
-                              --resource-group "$RG" \
-                              --name "$SNAPSHOT_NAME" \
-                              --duration-in-seconds 3600 \
-                              --query 'accessSas' -o tsv)
+            SNAPSHOT_URL=$(az snapshot grant-access \
+              --resource-group "$RG" \
+              --name "$SNAPSHOT_NAME" \
+              --duration-in-seconds 3600 \
+              --query 'accessSas' -o tsv)
 
-            SOURCE_URL="${SNAPSHOT_SAS}"
+            if [[ -z "$SNAPSHOT_URL" ]]; then
+              echo "❌ Failed to generate SAS URL for snapshot $SNAPSHOT_NAME"
+              exit 1
+            fi
+
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
-
-            echo "SOURCE: $SOURCE_URL"
+            echo "SOURCE: $SNAPSHOT_URL"
             echo "DEST:   $DEST_URL"
-
             echo "📤 Copying snapshot to Blob..."
-            azcopy copy "$SOURCE_URL" "$DEST_URL" --overwrite=true || { echo "❌ AzCopy failed for $NAME"; exit 1; }
+
+            azcopy copy "$SNAPSHOT_URL" "$DEST_URL" --overwrite=true || {
+              echo "❌ AzCopy failed for $NAME"
+              exit 1
+            }
 
             echo "✅ Snapshot copied to blob: $DEST_URL"
 
