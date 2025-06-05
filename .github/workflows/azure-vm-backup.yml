@@ -65,20 +65,19 @@ jobs:
               --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
             echo "🔗 Generating full snapshot SAS URL..."
-            SAS_TOKEN=$(az snapshot grant-access \
-              --resource-group "$RG" \
-              --name "$SNAPSHOT_NAME" \
-              --duration-in-seconds 3600 \
-              --query 'accessSas' -o tsv) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
+            SNAPSHOT_URL=$(az snapshot grant-access \
+                              --resource-group "$RG" \
+                              --name "$SNAPSHOT_NAME" \
+                            --duration-in-seconds 3600 \
+                              --query 'accessSas' -o tsv)
 
-            SNAPSHOT_URL="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Compute/snapshots/$SNAPSHOT_NAME?api-version=2022-03-02&$SAS_TOKEN"
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
 
-            echo "☁️ Copying snapshot to blob using AzCopy..."
-            echo "SOURCE: $SNAPSHOT_URL"
-            echo "DEST:   $DEST_URL"
+                         echo "SOURCE: $SNAPSHOT_URL"
+                         echo "DEST:   $DEST_URL"
 
-            azcopy copy "$SNAPSHOT_URL" "$DEST_URL" --overwrite=true || { echo "❌ AzCopy failed for $NAME"; exit 1; }
+                     azcopy copy "$SNAPSHOT_URL" "$DEST_URL" --overwrite=true
+
 
             echo "✅ Snapshot copied to blob: $DEST_URL"
 
