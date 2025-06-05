@@ -39,6 +39,8 @@ jobs:
             az account set --subscription "$SUB"
 
             SNAPSHOT_NAME="$NAME-$(date +%Y%m%d%H%M%S)-snapshot"
+            TEMP_DISK_NAME="$NAME-tempdisk-$(date +%s)"
+            DEST_BLOB_NAME="$SNAPSHOT_NAME.vhd"
 
             echo "📸 Creating snapshot: $SNAPSHOT_NAME"
             az snapshot create \
@@ -49,46 +51,41 @@ jobs:
               --sku Standard_LRS \
               --output none || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
-            echo "🔗 Generating SAS URL (retry logic enabled)..."
-            sleep 15  # give Azure time to finalize snapshot provisioning
+            echo "💾 Creating temporary disk from snapshot: $TEMP_DISK_NAME"
+            az disk create \
+              --resource-group "$RG" \
+              --name "$TEMP_DISK_NAME" \
+              --source "$SNAPSHOT_NAME" \
+              --location "$LOC" \
+              --sku Standard_LRS \
+              --output none || { echo "❌ Disk creation failed from snapshot for $NAME"; exit 1; }
 
-            SAS_URL=""
-            for i in {1..5}; do
-              SAS_URL=$(az snapshot grant-access \
-                --resource-group "$RG" \
-                --name "$SNAPSHOT_NAME" \
-                --duration-in-seconds 86400 \
-                --file-format VHD \
-                --query accessSas -o tsv)
-              if [ -n "$SAS_URL" ]; then
-                echo "✅ SAS URL obtained on attempt $i"
-                break
-              else
-                echo "⚠️ Attempt $i: SAS URL was empty, retrying in 10s..."
-                sleep 10
-              fi
-            done
+            echo "🔗 Generating SAS URL from temporary disk..."
+            SAS_URL=$(az disk grant-access \
+              --resource-group "$RG" \
+              --name "$TEMP_DISK_NAME" \
+              --duration-in-seconds 86400 \
+              --query accessSas -o tsv) || { echo "❌ Failed to generate SAS URL from disk for $NAME"; exit 1; }
 
             if [ -z "$SAS_URL" ]; then
-              echo "❌ Failed to obtain SAS URL after retries. Aborting backup for $NAME"
+              echo "❌ SAS URL from disk is empty. Aborting."
               exit 1
             fi
 
-            echo "📦 Creating container if not exists..."
+            echo "📦 Creating blob container if needed..."
             az storage container create \
               --name "$CONTAINER" \
               --account-name "$SA" \
               --auth-mode login
 
-            echo "☁️ Copying snapshot to blob..."
-            DEST_BLOB_NAME="${SNAPSHOT_NAME}.vhd"
+            echo "☁️ Copying disk to blob storage..."
             az storage blob copy start \
               --account-name "$SA" \
               --destination-blob "$DEST_BLOB_NAME" \
               --destination-container "$CONTAINER" \
               --source-uri "$SAS_URL" \
               --auth-mode login \
-              || { echo "❌ Blob copy start failed for $NAME"; exit 1; }
+              || { echo "❌ Blob copy failed for $NAME"; exit 1; }
 
             echo "⏳ Waiting for blob copy to complete..."
             while true; do
@@ -108,10 +105,11 @@ jobs:
               fi
             done
 
-            echo "✅ Blob copy completed"
+            echo "✅ Blob copy completed. Revoking access and cleaning up..."
+            az disk revoke-access --resource-group "$RG" --name "$TEMP_DISK_NAME"
+            az disk delete --resource-group "$RG" --name "$TEMP_DISK_NAME" --yes
+            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME"
 
-            echo "🧹 Cleaning up snapshot..."
-            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
-            echo "✅ Backup completed for VM: $NAME"
+            echo "✅ Backup finished for VM: $NAME"
 
           done
