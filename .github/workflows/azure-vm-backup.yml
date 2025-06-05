@@ -64,16 +64,16 @@ jobs:
               --location "$LOC" \
               --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
-            echo "🔗 Generating snapshot SAS URL..."
+            echo "🔗 Generating full SAS URL for snapshot..."
             SNAPSHOT_URL=$(az snapshot grant-access \
               --resource-group "$RG" \
               --name "$SNAPSHOT_NAME" \
-              --duration-in-seconds 86400 \
+              --duration-in-seconds 3600 \
               --query 'accessSas' -o tsv) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
 
-            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
             echo "☁️ Copying snapshot to blob using AzCopy..."
-            azcopy copy "$SNAPSHOT_URL" "$DEST_URL" || { echo "❌ AzCopy failed for $NAME"; exit 1; }
+            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
+            azcopy copy "$SNAPSHOT_URL" "$DEST_URL" --overwrite=true || { echo "❌ AzCopy failed for $NAME"; exit 1; }
 
             echo "✅ Snapshot copied to blob: $DEST_URL"
 
