@@ -54,13 +54,28 @@ jobs:
               --location "$LOC" \
               --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
-            echo "☁️ Exporting snapshot to blob..."
-            az snapshot export \
-              --name "$SNAPSHOT_NAME" \
-              --resource-group "$RG" \
-              --storage-account "$SA" \
+            echo "☁️ Copying snapshot to blob..."
+            SOURCE_URI="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Compute/snapshots/$SNAPSHOT_NAME"
+            DEST_BLOB="${SNAPSHOT_NAME}.vhd"
+
+            az storage blob copy start \
+              --account-name "$SA" \
+              --destination-container "$CONTAINER" \
+              --destination-blob "$DEST_BLOB" \
+              --source-uri "$SOURCE_URI" \
+              --auth-mode login || { echo "❌ Blob copy failed for $NAME"; exit 1; }
+
+            echo "⏳ Waiting for blob copy to complete..."
+            while [ "$(az storage blob copy show \
+              --account-name "$SA" \
               --container-name "$CONTAINER" \
-              --file-name "${SNAPSHOT_NAME}.vhd" || { echo "❌ Export failed for $NAME"; exit 1; }
+              --name "$DEST_BLOB" \
+              --auth-mode login \
+              --query 'copy.status' -o tsv)" != "success" ]; do
+              sleep 10
+              echo "Still copying..."
+            done
+            echo "✅ Blob copy completed"
 
             echo "🧹 Deleting snapshot..."
             az snapshot delete \
