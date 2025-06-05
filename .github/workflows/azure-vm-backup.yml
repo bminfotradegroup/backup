@@ -23,6 +23,8 @@ jobs:
         run: echo "CONFIG=$(jq -c . < vm_backup_config.json)" >> $GITHUB_ENV
 
       - name: Run VM backup
+        env:
+          AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
         run: |
           echo "$CONFIG" | jq -c '.[]' | while read vm; do
             NAME=$(echo $vm | jq -r '.name')
@@ -63,16 +65,22 @@ jobs:
             echo "Generated SAS URL: $SAS_URL"
 
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
+
             echo "☁️ Copying snapshot to blob: $DEST_URL"
             az storage blob copy start \
               --account-name "$SA" \
-              --account-key "${{ secrets.AZURE_STORAGE_KEY }}" \
+              --account-key "$AZURE_STORAGE_KEY" \
               --destination-blob "${SNAPSHOT_NAME}.vhd" \
               --destination-container "$CONTAINER" \
               --source-uri "$SAS_URL" || { echo "❌ Blob copy start failed for $NAME"; exit 1; }
 
             echo "⏳ Waiting for blob copy to complete..."
-            while [ "$(az storage blob copy show --account-name "$SA" --container "$CONTAINER" --blob "${SNAPSHOT_NAME}.vhd" --query 'copy.status' -o tsv)" != "success" ]; do
+            while [ "$(az storage blob copy show \
+              --account-name "$SA" \
+              --account-key "$AZURE_STORAGE_KEY" \
+              --container-name "$CONTAINER" \
+              --name "${SNAPSHOT_NAME}.vhd" \
+              --query 'copy.status' -o tsv)" != "success" ]; do
               sleep 10
               echo "Still copying..."
             done
