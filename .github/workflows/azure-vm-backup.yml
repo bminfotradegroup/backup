@@ -3,7 +3,7 @@ name: Azure VM Disk Backup
 on:
   workflow_dispatch:  # Manual run
   schedule:
-    - cron: '30 11 * * *'  # Daily at 5:00 PM IST (11:30 UTC, India Standard Time = UTC+5:30)
+    - cron: '30 11 * * *'  # Daily at 5:00 PM IST (11:30 UTC)
 
 jobs:
   backup:
@@ -61,7 +61,13 @@ jobs:
               --resource-group "$RG" \
               --name "$SNAPSHOT_NAME" \
               --duration-in-seconds 86400 \
-              --query accessSas -o tsv) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
+              --query 'accessSas' -o tsv)
+
+            if [ -z "$SAS_URL" ]; then
+              echo "❌ SAS generation failed for $SNAPSHOT_NAME — empty URL"
+              exit 1
+            fi
+
             echo "Generated SAS URL: $SAS_URL"
 
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
