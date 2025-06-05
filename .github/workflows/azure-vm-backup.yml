@@ -55,33 +55,46 @@ jobs:
               --duration-in-seconds 86400 \
               --query accessSas -o tsv) \
               || { echo "❌ SAS generation failed for $NAME"; exit 1; }
-            echo "Generated SAS URL: $SAS_URL"
+
+            if [ -z "$SAS_URL" ]; then
+              echo "❌ Empty SAS URL. Aborting copy."
+              exit 1
+            fi
 
             echo "📦 Creating container if not exists..."
             az storage container create \
               --name "$CONTAINER" \
               --account-name "$SA" \
-              --resource-group "$RG" \
               --auth-mode login
 
             echo "☁️ Copying snapshot to blob..."
+            DEST_BLOB_NAME="${SNAPSHOT_NAME}.vhd"
             az storage blob copy start \
               --account-name "$SA" \
-              --destination-blob "${SNAPSHOT_NAME}.vhd" \
+              --destination-blob "$DEST_BLOB_NAME" \
               --destination-container "$CONTAINER" \
               --source-uri "$SAS_URL" \
               --auth-mode login \
               || { echo "❌ Blob copy start failed for $NAME"; exit 1; }
 
             echo "⏳ Waiting for blob copy to complete..."
-            while [ "$(az storage blob copy show \
-              --account-name "$SA" \
-              --container-name "$CONTAINER" \
-              --name "${SNAPSHOT_NAME}.vhd" \
-              --query 'copy.status' -o tsv)" != "success" ]; do
-              sleep 10
-              echo "Still copying..."
+            while true; do
+              STATUS=$(az storage blob show \
+                --account-name "$SA" \
+                --container-name "$CONTAINER" \
+                --name "$DEST_BLOB_NAME" \
+                --query 'properties.copy.status' -o tsv)
+              echo "Copy status: $STATUS"
+              if [ "$STATUS" == "success" ]; then
+                break
+              elif [ "$STATUS" == "pending" ]; then
+                sleep 10
+              else
+                echo "❌ Blob copy failed with status: $STATUS"
+                exit 1
+              fi
             done
+
             echo "✅ Blob copy completed"
 
             echo "🧹 Cleaning up snapshot..."
