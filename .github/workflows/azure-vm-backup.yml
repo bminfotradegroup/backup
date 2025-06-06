@@ -71,7 +71,7 @@ jobs:
             fi
 
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
-            echo "☁️ Copying snapshot to blob using az storage blob copy..."
+            echo "☁️ Copying snapshot to blob..."
             echo "SOURCE: $SNAPSHOT_URL"
             echo "DEST:   $DEST_URL"
 
@@ -90,7 +90,8 @@ jobs:
 
             echo "✅ Snapshot copied to blob: $DEST_URL"
 
-            echo "🧹 Cleaning up snapshot..."
+            echo "🧹 Revoking SAS and deleting snapshot..."
+            az snapshot revoke-access --resource-group "$RG" --name "$SNAPSHOT_NAME" || echo "⚠️ No active SAS to revoke"
             az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
 
             echo "✅ Backup completed for VM: $NAME"
