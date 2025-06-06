@@ -1,10 +1,14 @@
 [
   {
-    "name": "Test-BackupVM",
-    "disk_name": "Test-BackupVM_OsDisk_1_522b9b43a633431b8d99ff4a7ae7bb49",
-    "resource_group": "Backup-Automation",
+    "name": "StorageServer",
+    "disk_name": "StorageServer_OsDisk_1_8bbdc6e7227e417e8cf4136271d1dc1e",
+    "resource_group": "Rahul",
     "location": "centralindia",
-    "subscription_id": "77e7336c-6927-42cb-b0e8-222560716043",
+    "subscription_id": "3c49de30-12ac-4756-8431-9e7ea1880348",
+    "client_id": "d5ec3057-71fc-4f09-8c94-fc079f594182",
+    "tenant_id": "43b2ab88-f668-409f-ba76-8db3e53453ae",
+    "destination_subscription_id": "77e7336c-6927-42cb-b0e8-222560716043",
+    "destination_resource_group": "Backup-Automation",
     "storage_account": "diskstorageautobackup",
     "container_name": "vhdsnapshots"
   }
