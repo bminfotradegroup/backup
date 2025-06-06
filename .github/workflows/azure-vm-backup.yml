@@ -65,11 +65,19 @@ jobs:
               --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
             echo "🔗 Generating snapshot SAS URL..."
-            SNAPSHOT_URL=$(az snapshot grant-access \
+            SNAPSHOT_JSON=$(az snapshot grant-access \
               --resource-group "$RG" \
               --name "$SNAPSHOT_NAME" \
               --duration-in-seconds 86400 \
-              --output json | jq -r '.accessSas') || { echo "❌ SAS generation failed for $NAME"; exit 1; }
+              --output json) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
+
+            echo "📦 Snapshot access JSON:"
+            echo "$SNAPSHOT_JSON" | jq
+
+            SNAPSHOT_URL=$(echo "$SNAPSHOT_JSON" | jq -r '.accessSas')
+            if [[ "$SNAPSHOT_URL" == "null" || -z "$SNAPSHOT_URL" ]]; then
+              echo "❌ Failed to extract snapshot SAS URL for $NAME"; exit 1;
+            fi
 
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
             echo "☁️ Copying snapshot to blob using AzCopy..."
