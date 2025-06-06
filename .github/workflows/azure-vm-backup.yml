@@ -1,13 +1,17 @@
 name: Azure VM Disk Backup
 
 on:
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:
   schedule:
-    - cron: '30 11 * * *'  # Daily at 5:00 PM IST (11:30 UTC)
+    - cron: '30 11 * * *'  # Daily at 5:00 PM IST
+
+env:
+  AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
 
 jobs:
   backup:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -17,6 +21,12 @@ jobs:
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Install AzCopy
+        run: |
+          wget https://aka.ms/downloadazcopy-v10-linux -O azcopy.tar.gz
+          tar -xvf azcopy.tar.gz
+          sudo mv ./azcopy_linux_amd64_*/azcopy /usr/bin/
 
       - name: Load backup config
         id: load_config
@@ -36,7 +46,7 @@ jobs:
             SA=$(echo $vm | jq -r '.storage_account')
             CONTAINER=$(echo $vm | jq -r '.container_name')
 
-            echo "🔐 Logging in to Azure..."
+            echo "🔐 Authenticating to Azure for VM: $NAME..."
             az login --service-principal \
               --username "$CLIENT_ID" \
               --password "$CLIENT_SECRET" \
@@ -54,18 +64,20 @@ jobs:
               --location "$LOC" \
               --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
-            echo "☁️ Exporting snapshot to blob..."
-            az snapshot export \
+            echo "🔗 Generating snapshot SAS URL..."
+            SNAPSHOT_URL=$(az snapshot grant-access \
+              --resource-group "$RG" \
               --name "$SNAPSHOT_NAME" \
-              --resource-group "$RG" \
-              --storage-account "$SA" \
-              --container-name "$CONTAINER" \
-              --file-name "${SNAPSHOT_NAME}.vhd" || { echo "❌ Export failed for $NAME"; exit 1; }
+              --duration-in-seconds 86400 \
+              --query 'accessSas' -o tsv) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
 
-            echo "🧹 Deleting snapshot..."
-            az snapshot delete \
-              --resource-group "$RG" \
-              --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
+            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
+            echo "☁️ Copying snapshot to blob using AzCopy..."
+            azcopy copy "$SNAPSHOT_URL" "$DEST_URL" || { echo "❌ AzCopy failed for $NAME"; exit 1; }
 
+            echo "✅ Snapshot copied to blob: $DEST_URL"
+
+            echo "🧹 Cleaning up snapshot..."
+            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
             echo "✅ Backup completed for VM: $NAME"
           done
