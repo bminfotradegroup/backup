@@ -82,7 +82,8 @@ jobs:
               --source-uri "$SAS_URL"
 
             echo "⏳ Waiting for blob copy to complete..."
-            while [ "$(az storage blob show --account-name "$SA" --container-name "$CONTAINER" --name "$DEST_BLOB" --query 'properties.copy.status' -o tsv)" != "success" ]; do
+            while [ "$(az storage blob show --account-name "$SA" --container-name "$CONTAINER" --name "$DEST_BLOB" --auth-mode login --query 'properties.copy.status' -o tsv)" != "success" ]; do
+
               sleep 10
               echo "Still copying..."
             done
