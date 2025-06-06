@@ -6,6 +6,7 @@
     "location": "centralindia",
     "subscription_id": "3c49de30-12ac-4756-8431-9e7ea1880348",
     "client_id": "d5ec3057-71fc-4f09-8c94-fc079f594182",
+    "client_secret": "${{ secrets.AZURE_CLIENT_SECRET }}",
     "tenant_id": "43b2ab88-f668-409f-ba76-8db3e53453ae",
     "destination_subscription_id": "77e7336c-6927-42cb-b0e8-222560716043",
     "destination_resource_group": "Backup-Automation",
