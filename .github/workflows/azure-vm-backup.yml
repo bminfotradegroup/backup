@@ -1,4 +1,4 @@
-name: Cross-Subscription Snapshot Backup
+name: Cross-Subscription VM Snapshot Backup
 
 on:
   workflow_dispatch:
@@ -6,16 +6,19 @@ on:
 jobs:
   snapshot-and-copy:
     runs-on: ubuntu-latest
-    steps:
 
+    steps:
+    # 🔐 Login to Subscription A
     - name: Azure CLI login to Subscription A
       uses: azure/login@v1
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS_SUB_A }}
 
+    # 📸 Create Snapshot
     - name: Create snapshot in Subscription A
       run: |
         az account set --subscription "3c49de30-12ac-4756-8431-9e7ea1880348"
+        echo "Creating snapshot of disk..."
         az snapshot create \
           --resource-group Rahul \
           --name StorageServerSnapshot \
@@ -23,27 +26,47 @@ jobs:
           --source "/subscriptions/3c49de30-12ac-4756-8431-9e7ea1880348/resourceGroups/Rahul/providers/Microsoft.Compute/disks/StorageServer_OsDisk_1_8bbdc6e7227e417e8cf4136271d1dc1e" \
           --output none
 
+    # 🔗 Generate SAS URL
     - name: Generate SAS URL for snapshot
       id: snapshot_sas
       run: |
+        az account set --subscription "3c49de30-12ac-4756-8431-9e7ea1880348"
+        echo "Generating SAS URL..."
         SAS_URL=$(az snapshot grant-access \
           --resource-group Rahul \
           --name StorageServerSnapshot \
           --duration-in-seconds 3600 \
           --query accessSas -o tsv)
+        echo "sas_url=$SAS_URL"
         echo "sas_url=$SAS_URL" >> $GITHUB_OUTPUT
 
+    # 🔐 Login to Subscription B
     - name: Azure CLI login to Subscription B
       uses: azure/login@v1
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS_SUB_B }}
 
+    # ☁️ Copy snapshot to Subscription B's storage account
     - name: Copy snapshot VHD to Subscription B storage
       run: |
         az account set --subscription "77e7336c-6927-42cb-b0e8-222560716043"
+        echo "Copying snapshot to storage blob using AAD..."
+        echo "Using SAS URL: ${{ steps.snapshot_sas.outputs.sas_url }}"
+
         az storage blob copy start \
           --account-name diskstorageautobackup \
+          --auth-mode login \
           --destination-container vhdsnapshots \
           --destination-blob StorageServerSnapshot.vhd \
           --source-uri "${{ steps.snapshot_sas.outputs.sas_url }}" \
           --output none
+
+    # 🧹 (Optional) Delete Snapshot from Subscription A
+    - name: Clean up snapshot in Subscription A
+      if: always()
+      run: |
+        az account set --subscription "3c49de30-12ac-4756-8431-9e7ea1880348"
+        echo "Cleaning up snapshot..."
+        az snapshot delete \
+          --resource-group Rahul \
+          --name StorageServerSnapshot
