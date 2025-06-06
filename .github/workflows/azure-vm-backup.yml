@@ -22,12 +22,6 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Install AzCopy
-        run: |
-          wget https://aka.ms/downloadazcopy-v10-linux -O azcopy.tar.gz
-          tar -xvf azcopy.tar.gz
-          sudo mv ./azcopy_linux_amd64_*/azcopy /usr/bin/
-
       - name: Load backup config
         id: load_config
         run: echo "CONFIG=$(jq -c . < vm_backup_config.json)" >> $GITHUB_ENV
@@ -71,20 +65,28 @@ jobs:
               --duration-in-seconds 86400 \
               --output json) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
 
-            echo "📦 Snapshot access JSON:"
-            echo "$SNAPSHOT_JSON" | jq
-
             SNAPSHOT_URL=$(echo "$SNAPSHOT_JSON" | jq -r '."accessSAS" // ."accessSas"')
             if [[ "$SNAPSHOT_URL" == "null" || -z "$SNAPSHOT_URL" ]]; then
               echo "❌ Failed to extract snapshot SAS URL for $NAME"; exit 1;
             fi
 
             DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
-            echo "☁️ Copying snapshot to blob using AzCopy..."
+            echo "☁️ Copying snapshot to blob using az storage blob copy..."
             echo "SOURCE: $SNAPSHOT_URL"
             echo "DEST:   $DEST_URL"
 
-            azcopy copy "$SNAPSHOT_URL" "$DEST_URL" --overwrite=true || { echo "❌ AzCopy failed for $NAME"; exit 1; }
+            az storage blob copy start \
+              --account-name "$SA" \
+              --account-key "$AZURE_STORAGE_KEY" \
+              --destination-container "$CONTAINER" \
+              --destination-blob "${SNAPSHOT_NAME}.vhd" \
+              --source-uri "$SNAPSHOT_URL" || { echo "❌ Blob copy failed for $NAME"; exit 1; }
+
+            echo "⏳ Waiting for blob copy to complete..."
+            while [ "$(az storage blob show --account-name "$SA" --container-name "$CONTAINER" --name "${SNAPSHOT_NAME}.vhd" --query 'properties.copy.status' -o tsv)" != "success" ]; do
+              sleep 10
+              echo "Still copying..."
+            done
 
             echo "✅ Snapshot copied to blob: $DEST_URL"
 
