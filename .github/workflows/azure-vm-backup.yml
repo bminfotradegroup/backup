@@ -1,115 +1,71 @@
-name: Azure VM Backup
+name: Azure VM Disk Backup
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: '30 11 * * *'  # Daily at 5:00 PM IST (11:30 UTC)
 
 jobs:
-  backup-vms:
+  backup:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Log in to Azure
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Install Azure CLI
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
-      - name: Install jq
-        run: sudo apt-get install jq -y
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Load VM configuration and run backup
-        env:
-          CONFIG_FILE: vm_backup_config.json
+      - name: Load backup config
+        id: load_config
+        run: echo "CONFIG=$(jq -c . < vm_backup_config.json)" >> $GITHUB_ENV
+
+      - name: Run VM backup
         run: |
-          CONFIGS=$(cat $CONFIG_FILE)
+          echo "$CONFIG" | jq -c '.[]' | while read vm; do
+            NAME=$(echo $vm | jq -r '.name')
+            DISK=$(echo $vm | jq -r '.disk_name')
+            RG=$(echo $vm | jq -r '.resource_group')
+            LOC=$(echo $vm | jq -r '.location')
+            SUB=$(echo $vm | jq -r '.subscription_id')
+            CLIENT_ID="76cd8095-15aa-4b90-b72a-9e1477f9c865"
+            CLIENT_SECRET="wH58Q~4lQwiD.ROpoeKRlCJAEshGLfetnmVjraCl"
+            TENANT_ID="43b2ab88-f668-409f-ba76-8db3e53453ae"
+            SA=$(echo $vm | jq -r '.storage_account')
+            CONTAINER=$(echo $vm | jq -r '.container_name')
 
-          echo "$CONFIGS" | jq -c '.[]' | while read -r vm;
-          do
-            NAME=$(echo "$vm" | jq -r '.name')
-            DISK=$(echo "$vm" | jq -r '.disk_name')
-            RG=$(echo "$vm" | jq -r '.resource_group')
-            LOC=$(echo "$vm" | jq -r '.location')
-            SUB=$(echo "$vm" | jq -r '.subscription_id')
-            SA=$(echo "$vm" | jq -r '.storage_account')
-            CONTAINER=$(echo "$vm" | jq -r '.container_name')
+            echo "🔐 Logging in to Azure..."
+            az login --service-principal \
+              --username "$CLIENT_ID" \
+              --password "$CLIENT_SECRET" \
+              --tenant "$TENANT_ID" \
+              --allow-no-subscriptions || { echo "❌ Login failed for $NAME"; exit 1; }
 
-            echo "Backing up VM: $NAME"
-            az account set --subscription "$SUB"
+            az account set --subscription "$SUB" || { echo "❌ Subscription set failed for $NAME"; exit 1; }
 
-            SNAPSHOT_NAME="$NAME-$(date +%Y%m%d%H%M%S)-snapshot"
-            TEMP_DISK_NAME="$NAME-tempdisk-$(date +%s)"
-            DEST_BLOB_NAME="$SNAPSHOT_NAME.vhd"
-
+            SNAPSHOT_NAME="snap-${NAME}-$(date +%Y%m%d%H%M%S)"
             echo "📸 Creating snapshot: $SNAPSHOT_NAME"
             az snapshot create \
-              --resource-group "$RG" \
               --name "$SNAPSHOT_NAME" \
-              --location "$LOC" \
+              --resource-group "$RG" \
               --source "$DISK" \
-              --sku Standard_LRS \
-              --output none || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
-
-            echo "💾 Creating temporary disk from snapshot: $TEMP_DISK_NAME"
-            az disk create \
-              --resource-group "$RG" \
-              --name "$TEMP_DISK_NAME" \
-              --source "$SNAPSHOT_NAME" \
               --location "$LOC" \
-              --sku Standard_LRS \
-              --output none || { echo "❌ Disk creation failed from snapshot for $NAME"; exit 1; }
+              --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
 
-            echo "🔗 Generating SAS URL from temporary disk..."
-            SAS_URL=$(az disk grant-access \
+            echo "☁️ Exporting snapshot to blob..."
+            az snapshot export \
+              --name "$SNAPSHOT_NAME" \
               --resource-group "$RG" \
-              --name "$TEMP_DISK_NAME" \
-              --duration-in-seconds 86400 \
-              --query accessSas -o tsv) || { echo "❌ Failed to generate SAS URL from disk for $NAME"; exit 1; }
+              --storage-account "$SA" \
+              --container-name "$CONTAINER" \
+              --file-name "${SNAPSHOT_NAME}.vhd" || { echo "❌ Export failed for $NAME"; exit 1; }
 
-            if [ -z "$SAS_URL" ]; then
-              echo "❌ SAS URL from disk is empty. Aborting."
-              exit 1
-            fi
+            echo "🧹 Deleting snapshot..."
+            az snapshot delete \
+              --resource-group "$RG" \
+              --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
 
-            echo "📦 Creating blob container if needed..."
-            az storage container create \
-              --name "$CONTAINER" \
-              --account-name "$SA" \
-              --auth-mode login
-
-            echo "☁️ Copying disk to blob storage..."
-            az storage blob copy start \
-              --account-name "$SA" \
-              --destination-blob "$DEST_BLOB_NAME" \
-              --destination-container "$CONTAINER" \
-              --source-uri "$SAS_URL" \
-              --auth-mode login \
-              || { echo "❌ Blob copy failed for $NAME"; exit 1; }
-
-            echo "⏳ Waiting for blob copy to complete..."
-            while true; do
-              STATUS=$(az storage blob show \
-                --account-name "$SA" \
-                --container-name "$CONTAINER" \
-                --name "$DEST_BLOB_NAME" \
-                --query 'properties.copy.status' -o tsv)
-              echo "Copy status: $STATUS"
-              if [ "$STATUS" == "success" ]; then
-                break
-              elif [ "$STATUS" == "pending" ]; then
-                sleep 10
-              else
-                echo "❌ Blob copy failed with status: $STATUS"
-                exit 1
-              fi
-            done
-
-            echo "✅ Blob copy completed. Revoking access and cleaning up..."
-            az disk revoke-access --resource-group "$RG" --name "$TEMP_DISK_NAME"
-            az disk delete --resource-group "$RG" --name "$TEMP_DISK_NAME" --yes
-            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME"
-
-            echo "✅ Backup finished for VM: $NAME"
-
+            echo "✅ Backup completed for VM: $NAME"
           done
