@@ -33,21 +33,19 @@ jobs:
             DISK=$(echo $vm | jq -r '.disk_name')
             RG=$(echo $vm | jq -r '.resource_group')
             LOC=$(echo $vm | jq -r '.location')
-            SUB=$(echo $vm | jq -r '.subscription_id')
-            CLIENT_ID="76cd8095-15aa-4b90-b72a-9e1477f9c865"
-            CLIENT_SECRET="wH58Q~4lQwiD.ROpoeKRlCJAEshGLfetnmVjraCl"
-            TENANT_ID="43b2ab88-f668-409f-ba76-8db3e53453ae"
+            SUB_A=$(echo $vm | jq -r '.subscription_id')
+            CLIENT_ID=$(echo $vm | jq -r '.client_id')
+            CLIENT_SECRET=$(echo $vm | jq -r '.client_secret')
+            TENANT_ID=$(echo $vm | jq -r '.tenant_id')
+
+            SUB_B=$(echo $vm | jq -r '.destination_subscription_id')
+            RG_B=$(echo $vm | jq -r '.destination_resource_group')
             SA=$(echo $vm | jq -r '.storage_account')
             CONTAINER=$(echo $vm | jq -r '.container_name')
 
-            echo "🔐 Authenticating to Azure for VM: $NAME..."
-            az login --service-principal \
-              --username "$CLIENT_ID" \
-              --password "$CLIENT_SECRET" \
-              --tenant "$TENANT_ID" \
-              --allow-no-subscriptions || { echo "❌ Login failed for $NAME"; exit 1; }
-
-            az account set --subscription "$SUB" || { echo "❌ Subscription set failed for $NAME"; exit 1; }
+            echo "🔐 Logging into Subscription A (source)..."
+            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID"
+            az account set --subscription "$SUB_A"
 
             SNAPSHOT_NAME="snap-${NAME}-$(date +%Y%m%d%H%M%S)"
             echo "📸 Creating snapshot: $SNAPSHOT_NAME"
@@ -56,43 +54,41 @@ jobs:
               --resource-group "$RG" \
               --source "$DISK" \
               --location "$LOC" \
-              --sku Standard_LRS || { echo "❌ Snapshot creation failed for $NAME"; exit 1; }
+              --sku Standard_LRS
 
-            echo "🔗 Generating snapshot SAS URL..."
-            SNAPSHOT_JSON=$(az snapshot grant-access \
-              --resource-group "$RG" \
-              --name "$SNAPSHOT_NAME" \
-              --duration-in-seconds 86400 \
-              --output json) || { echo "❌ SAS generation failed for $NAME"; exit 1; }
+            echo "🔗 Generating SAS URL for snapshot..."
+            SAS_JSON=$(az snapshot grant-access --name "$SNAPSHOT_NAME" --resource-group "$RG" --duration-in-seconds 86400)
+            SAS_URL=$(echo "$SAS_JSON" | jq -r '.accessSas')
 
-            SNAPSHOT_URL=$(echo "$SNAPSHOT_JSON" | jq -r '."accessSAS" // ."accessSas"')
-            if [[ "$SNAPSHOT_URL" == "null" || -z "$SNAPSHOT_URL" ]]; then
-              echo "❌ Failed to extract snapshot SAS URL for $NAME"; exit 1;
+            if [[ "$SAS_URL" == "null" || -z "$SAS_URL" ]]; then
+              echo "❌ Failed to generate SAS URL"; exit 1
             fi
 
-            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${SNAPSHOT_NAME}.vhd"
-            echo "☁️ Copying snapshot to blob..."
-            echo "SOURCE: $SNAPSHOT_URL"
-            echo "DEST:   $DEST_URL"
+            echo "🔐 Switching to Subscription B (destination)..."
+            az account set --subscription "$SUB_B"
 
+            DEST_BLOB="${SNAPSHOT_NAME}.vhd"
+            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${DEST_BLOB}"
+            echo "☁️ Copying snapshot to Subscription B blob storage..."
             az storage blob copy start \
               --account-name "$SA" \
               --account-key "$AZURE_STORAGE_KEY" \
               --destination-container "$CONTAINER" \
-              --destination-blob "${SNAPSHOT_NAME}.vhd" \
-              --source-uri "$SNAPSHOT_URL" || { echo "❌ Blob copy failed for $NAME"; exit 1; }
+              --destination-blob "$DEST_BLOB" \
+              --source-uri "$SAS_URL"
 
             echo "⏳ Waiting for blob copy to complete..."
-            while [ "$(az storage blob show --account-name "$SA" --container-name "$CONTAINER" --name "${SNAPSHOT_NAME}.vhd" --query 'properties.copy.status' -o tsv)" != "success" ]; do
+            while [ "$(az storage blob show --account-name "$SA" --container-name "$CONTAINER" --name "$DEST_BLOB" --query 'properties.copy.status' -o tsv)" != "success" ]; do
               sleep 10
               echo "Still copying..."
             done
 
-            echo "✅ Snapshot copied to blob: $DEST_URL"
+            echo "✅ Snapshot copied: $DEST_URL"
 
-            echo "🧹 Revoking SAS and deleting snapshot..."
-            az snapshot revoke-access --resource-group "$RG" --name "$SNAPSHOT_NAME" || echo "⚠️ No active SAS to revoke"
-            az snapshot delete --resource-group "$RG" --name "$SNAPSHOT_NAME" || { echo "❌ Snapshot deletion failed for $NAME"; exit 1; }
+            echo "🔙 Switching back to Subscription A to clean up..."
+            az account set --subscription "$SUB_A"
+            az snapshot revoke-access --name "$SNAPSHOT_NAME" --resource-group "$RG"
+            az snapshot delete --name "$SNAPSHOT_NAME" --resource-group "$RG"
 
-            echo "✅ Backup completed for VM: $NAME"
+            echo "✅ Backup done for: $NAME"
           done
