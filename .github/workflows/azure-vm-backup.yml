@@ -5,9 +5,6 @@ on:
   schedule:
     - cron: '30 11 * * *'  # Daily at 5:00 PM IST
 
-env:
-  AZURE_STORAGE_KEY_SUB_B: ${{ secrets.AZURE_STORAGE_KEY_SUB_B }}
-
 jobs:
   backup:
     runs-on: ubuntu-latest
@@ -28,23 +25,29 @@ jobs:
 
       - name: Run VM backup
         run: |
+          CREDS_SUB_A='${{ secrets.AZURE_CREDENTIALS_SUB_A }}'
+          CREDS_SUB_B='${{ secrets.AZURE_CREDENTIALS_SUB_B }}'
+
+          CLIENT_ID_A=$(echo "$CREDS_SUB_A" | jq -r '.clientId')
+          CLIENT_SECRET_A=$(echo "$CREDS_SUB_A" | jq -r '.clientSecret')
+          TENANT_ID_A=$(echo "$CREDS_SUB_A" | jq -r '.tenantId')
+          SUB_A=$(echo "$CREDS_SUB_A" | jq -r '.subscriptionId')
+
+          CLIENT_ID_B=$(echo "$CREDS_SUB_B" | jq -r '.clientId')
+          CLIENT_SECRET_B=$(echo "$CREDS_SUB_B" | jq -r '.clientSecret')
+          TENANT_ID_B=$(echo "$CREDS_SUB_B" | jq -r '.tenantId')
+          SUB_B=$(echo "$CREDS_SUB_B" | jq -r '.subscriptionId')
+
           echo "$CONFIG" | jq -c '.[]' | while read vm; do
             NAME=$(echo $vm | jq -r '.name')
             DISK=$(echo $vm | jq -r '.disk_name')
             RG=$(echo $vm | jq -r '.resource_group')
             LOC=$(echo $vm | jq -r '.location')
-            SUB_A=$(echo $vm | jq -r '.subscription_id')
-            CLIENT_ID=$(echo $vm | jq -r '.client_id')
-            CLIENT_SECRET=$(echo $vm | jq -r '.client_secret')
-            TENANT_ID=$(echo $vm | jq -r '.tenant_id')
-
-            SUB_B=$(echo $vm | jq -r '.destination_subscription_id')
-            RG_B=$(echo $vm | jq -r '.destination_resource_group')
             SA=$(echo $vm | jq -r '.storage_account')
             CONTAINER=$(echo $vm | jq -r '.container_name')
 
             echo "🔐 Logging into Subscription A (source)..."
-            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID"
+            az login --service-principal -u "$CLIENT_ID_A" -p "$CLIENT_SECRET_A" --tenant "$TENANT_ID_A" --allow-no-subscriptions
             az account set --subscription "$SUB_A"
 
             SNAPSHOT_NAME="snap-${NAME}-$(date +%Y%m%d%H%M%S)"
@@ -57,56 +60,40 @@ jobs:
               --sku Standard_LRS
 
             echo "🔗 Generating SAS URL for snapshot..."
-            MAX_RETRIES=5
-            RETRY_DELAY=10
-            for i in $(seq 1 $MAX_RETRIES); do
-              SAS_JSON=$(az snapshot grant-access --name "$SNAPSHOT_NAME" --resource-group "$RG" --duration-in-seconds 86400 2>/dev/null || true)
-              SAS_URL=$(echo "$SAS_JSON" | jq -r '.accessSas // .accessSAS')
-
-              if [[ "$SAS_URL" != "null" && -n "$SAS_URL" ]]; then
-                echo "✅ SAS URL generated successfully"
-                break
-              else
-                echo "⚠️ Attempt $i: Failed to get SAS URL. Retrying in $RETRY_DELAY seconds..."
-                sleep $RETRY_DELAY
-              fi
-            done
+            SAS_JSON=$(az snapshot grant-access --name "$SNAPSHOT_NAME" --resource-group "$RG" --duration-in-seconds 86400)
+            SAS_URL=$(echo "$SAS_JSON" | jq -r '.accessSas')
 
             if [[ "$SAS_URL" == "null" || -z "$SAS_URL" ]]; then
-              echo "❌ Failed to generate SAS URL after $MAX_RETRIES attempts."
-              exit 1
+              echo "❌ Failed to generate SAS URL"; exit 1
             fi
 
-            echo "🔐 Switching to Subscription B (destination)..."
+            echo "🔐 Logging into Subscription B (destination)..."
+            az login --service-principal -u "$CLIENT_ID_B" -p "$CLIENT_SECRET_B" --tenant "$TENANT_ID_B" --allow-no-subscriptions
             az account set --subscription "$SUB_B"
 
             DEST_BLOB="${SNAPSHOT_NAME}.vhd"
+            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${DEST_BLOB}"
             echo "☁️ Copying snapshot to Subscription B blob storage..."
             az storage blob copy start \
               --account-name "$SA" \
-              --account-key "$AZURE_STORAGE_KEY_SUB_B" \
+              --auth-mode login \
               --destination-container "$CONTAINER" \
               --destination-blob "$DEST_BLOB" \
               --source-uri "$SAS_URL"
 
             echo "⏳ Waiting for blob copy to complete..."
-            while true; do
-              STATUS=$(az storage blob show \
-                --account-name "$SA" \
-                --container-name "$CONTAINER" \
-                --name "$DEST_BLOB" \
-                --query 'properties.copy.status' -o tsv)
-              echo "Copy status: $STATUS"
-              [[ "$STATUS" == "success" ]] && break
-              sleep 15
+            while [ "$(az storage blob show --account-name "$SA" --container-name "$CONTAINER" --name "$DEST_BLOB" --query 'properties.copy.status' -o tsv)" != "success" ]; do
+              sleep 10
+              echo "Still copying..."
             done
 
-            echo "✅ Snapshot copied successfully to: https://${SA}.blob.core.windows.net/${CONTAINER}/${DEST_BLOB}"
+            echo "✅ Snapshot copied: $DEST_URL"
 
             echo "🔙 Switching back to Subscription A to clean up..."
+            az login --service-principal -u "$CLIENT_ID_A" -p "$CLIENT_SECRET_A" --tenant "$TENANT_ID_A" --allow-no-subscriptions
             az account set --subscription "$SUB_A"
             az snapshot revoke-access --name "$SNAPSHOT_NAME" --resource-group "$RG"
             az snapshot delete --name "$SNAPSHOT_NAME" --resource-group "$RG"
 
-            echo "✅ Backup complete for: $NAME"
+            echo "✅ Backup done for: $NAME"
           done
