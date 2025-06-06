@@ -74,7 +74,7 @@ jobs:
             echo "📦 Snapshot access JSON:"
             echo "$SNAPSHOT_JSON" | jq
 
-            SNAPSHOT_URL=$(echo "$SNAPSHOT_JSON" | jq -r '.accessSas')
+            SNAPSHOT_URL=$(echo "$SNAPSHOT_JSON" | jq -r '."accessSAS" // ."accessSas"')
             if [[ "$SNAPSHOT_URL" == "null" || -z "$SNAPSHOT_URL" ]]; then
               echo "❌ Failed to extract snapshot SAS URL for $NAME"; exit 1;
             fi
