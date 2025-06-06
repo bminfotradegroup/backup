@@ -1,94 +1,49 @@
-name: Azure VM Disk Backup
+name: Cross-Subscription Snapshot Backup
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '30 11 * * *'  # Daily at 5:00 PM IST
-
-env:
-  AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
 
 jobs:
-  backup:
+  snapshot-and-copy:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
 
-      - name: Install Azure CLI
-        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+    - name: Azure CLI login to Subscription A
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS_SUB_A }}
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq
+    - name: Create snapshot in Subscription A
+      run: |
+        az account set --subscription "3c49de30-12ac-4756-8431-9e7ea1880348"
+        az snapshot create \
+          --resource-group Rahul \
+          --name StorageServerSnapshot \
+          --location centralindia \
+          --source "/subscriptions/3c49de30-12ac-4756-8431-9e7ea1880348/resourceGroups/Rahul/providers/Microsoft.Compute/disks/StorageServer_OsDisk_1_8bbdc6e7227e417e8cf4136271d1dc1e" \
+          --output none
 
-      - name: Load backup config
-        id: load_config
-        run: echo "CONFIG=$(jq -c . < vm_backup_config.json)" >> $GITHUB_ENV
+    - name: Generate SAS URL for snapshot
+      id: snapshot_sas
+      run: |
+        SAS_URL=$(az snapshot grant-access \
+          --resource-group Rahul \
+          --name StorageServerSnapshot \
+          --duration-in-seconds 3600 \
+          --query accessSas -o tsv)
+        echo "sas_url=$SAS_URL" >> $GITHUB_OUTPUT
 
-      - name: Run VM backup
-        run: |
-          echo "$CONFIG" | jq -c '.[]' | while read vm; do
-            NAME=$(echo $vm | jq -r '.name')
-            DISK=$(echo $vm | jq -r '.disk_name')
-            RG=$(echo $vm | jq -r '.resource_group')
-            LOC=$(echo $vm | jq -r '.location')
-            SUB_A=$(echo $vm | jq -r '.subscription_id')
-            CLIENT_ID=$(echo $vm | jq -r '.client_id')
-            CLIENT_SECRET=$(echo $vm | jq -r '.client_secret')
-            TENANT_ID=$(echo $vm | jq -r '.tenant_id')
+    - name: Azure CLI login to Subscription B
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS_SUB_B }}
 
-            SUB_B=$(echo $vm | jq -r '.destination_subscription_id')
-            RG_B=$(echo $vm | jq -r '.destination_resource_group')
-            SA=$(echo $vm | jq -r '.storage_account')
-            CONTAINER=$(echo $vm | jq -r '.container_name')
-
-            echo "🔐 Logging into Subscription A (source)..."
-            az login --service-principal -u "$CLIENT_ID" -p "$CLIENT_SECRET" --tenant "$TENANT_ID"
-            az account set --subscription "$SUB_A"
-
-            SNAPSHOT_NAME="snap-${NAME}-$(date +%Y%m%d%H%M%S)"
-            echo "📸 Creating snapshot: $SNAPSHOT_NAME"
-            az snapshot create \
-              --name "$SNAPSHOT_NAME" \
-              --resource-group "$RG" \
-              --source "$DISK" \
-              --location "$LOC" \
-              --sku Standard_LRS
-
-            echo "🔗 Generating SAS URL for snapshot..."
-            SAS_JSON=$(az snapshot grant-access --name "$SNAPSHOT_NAME" --resource-group "$RG" --duration-in-seconds 86400)
-            SAS_URL=$(echo "$SAS_JSON" | jq -r '.accessSas')
-
-            if [[ "$SAS_URL" == "null" || -z "$SAS_URL" ]]; then
-              echo "❌ Failed to generate SAS URL"; exit 1
-            fi
-
-            echo "🔐 Switching to Subscription B (destination)..."
-            az account set --subscription "$SUB_B"
-
-            DEST_BLOB="${SNAPSHOT_NAME}.vhd"
-            DEST_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${DEST_BLOB}"
-            echo "☁️ Copying snapshot to Subscription B blob storage..."
-            az storage blob copy start \
-              --account-name "$SA" \
-              --account-key "$AZURE_STORAGE_KEY" \
-              --destination-container "$CONTAINER" \
-              --destination-blob "$DEST_BLOB" \
-              --source-uri "$SAS_URL"
-
-            echo "⏳ Waiting for blob copy to complete..."
-            while [ "$(az storage blob show --account-name "$SA" --container-name "$CONTAINER" --name "$DEST_BLOB" --query 'properties.copy.status' -o tsv)" != "success" ]; do
-              sleep 10
-              echo "Still copying..."
-            done
-
-            echo "✅ Snapshot copied: $DEST_URL"
-
-            echo "🔙 Switching back to Subscription A to clean up..."
-            az account set --subscription "$SUB_A"
-            az snapshot revoke-access --name "$SNAPSHOT_NAME" --resource-group "$RG"
-            az snapshot delete --name "$SNAPSHOT_NAME" --resource-group "$RG"
-
-            echo "✅ Backup done for: $NAME"
-          done
+    - name: Copy snapshot VHD to Subscription B storage
+      run: |
+        az account set --subscription "77e7336c-6927-42cb-b0e8-222560716043"
+        az storage blob copy start \
+          --account-name diskstorageautobackup \
+          --destination-container vhdsnapshots \
+          --destination-blob StorageServerSnapshot.vhd \
+          --source-uri "${{ steps.snapshot_sas.outputs.sas_url }}" \
+          --output none
